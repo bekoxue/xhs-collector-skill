@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 import collector_core as core
 import product_xhs as product
@@ -177,13 +178,17 @@ def run_collect(args) -> int:
             new_seen = seen_ids + [
                 r.get(seen_key) for r in (resp.get("records") or []) if r.get(seen_key)
             ]
-        resume_path = core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
+        resume_path = (
+            Path(args.resume_file)
+            if getattr(args, "resume_file", "")
+            else core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
+        )
         try:
             core.save_resume(resume_path, patch, new_seen, context)
         except (OSError, UnicodeError):
             warnings.append(
-                "采集结果已保存，但断点文件写入失败；本次请求可能已扣费，请勿从头重采，"
-                "请先运行 balance 查看流水"
+                "采集结果已保存，但断点文件未能原子更新；本次请求可能已扣费，"
+                "请勿重复执行旧 resume_hint 或从头重采，请先运行 balance 查看流水"
             )
         else:
             out["resume_hint"] = core.build_resume_hint(resume_path)

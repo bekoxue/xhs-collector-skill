@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.6"
+SKILL_VERSION = "0.1.7"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -490,7 +490,8 @@ def emit_error(err: CollectorError, quiet: bool = False) -> int:
 # 断点续采文件
 # ---------------------------------------------------------------------------
 def resume_file_path(out_dir: str, data_type: str, ident: str) -> Path:
-    return Path(out_dir) / f".resume_{data_type}_{_slug(ident)}.json"
+    run_id = uuid.uuid4().hex
+    return Path(out_dir) / f".resume_{data_type}_{_slug(ident)}_{run_id}.json"
 
 
 def resume_context(command: str, data_type: str, request_body: dict) -> dict:
@@ -511,16 +512,29 @@ def save_resume(
     path: Path, request_patch: dict, seen_ids: list, context: dict
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({
-            "context": context,
-            "request_patch": request_patch,
-            "seen_ids": seen_ids,
-            "saved_at": int(time.time()),
-        }, ensure_ascii=False),
-        encoding="utf-8",
-        errors="backslashreplace",
-    )
+    payload = json.dumps({
+        "context": context,
+        "request_patch": request_patch,
+        "seen_ids": seen_ids,
+        "saved_at": int(time.time()),
+    }, ensure_ascii=False)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temp_created = False
+    try:
+        with temp_path.open(
+            "x", encoding="utf-8", errors="backslashreplace"
+        ) as fh:
+            temp_created = True
+            fh.write(payload)
+        os.replace(temp_path, path)
+    finally:
+        if temp_created:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 def load_resume(path: str, expected_context: dict) -> dict:
