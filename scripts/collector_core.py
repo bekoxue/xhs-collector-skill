@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import getpass
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -24,7 +25,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.2"
+SKILL_VERSION = "0.1.3"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -197,6 +198,11 @@ def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int 
                 time.sleep(err.retry_after or min(60, 15 * attempts))
                 continue
             raise err
+        except (UnicodeDecodeError, json.JSONDecodeError, http.client.IncompleteRead):
+            raise CollectorError(
+                "SERVICE_UNAVAILABLE",
+                "服务响应内容异常。注意：服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+            )
         except urllib.error.URLError as e:
             reason = getattr(e, "reason", e)
             if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
@@ -256,9 +262,19 @@ def write_outputs(resp: dict, out_dir: str, fmt: str, name_hint: str = "") -> di
             w = csv.writer(fh)
             w.writerow([labels.get(k, k) for k in keys])
             for r in records:
-                w.writerow([r.get(k, "") for k in keys])
+                w.writerow([_csv_safe_cell(r.get(k, "")) for k in keys])
         paths["output_csv"] = str(p)
     return paths
+
+
+def _csv_safe_cell(value):
+    """阻止不可信采集文本被表格软件解释为公式，非字符串值保持原类型。"""
+    if not isinstance(value, str):
+        return value
+    probe = value.lstrip(" \t\r\n")
+    if probe.startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r")):
+        return "'" + value
+    return value
 
 
 def build_preview(resp: dict, limit: int = 3, field_limit: int = 4) -> list:
