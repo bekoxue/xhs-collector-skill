@@ -10,6 +10,7 @@ import getpass
 import hashlib
 import http.client
 import json
+import math
 import os
 import platform
 import re
@@ -18,6 +19,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -25,7 +27,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.4"
+SKILL_VERSION = "0.1.5"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -202,6 +204,32 @@ def _is_dict_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, dict) for item in value)
 
 
+def _is_finite_number(value: object) -> bool:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
+
+
+def _is_ledger_list(value: object) -> bool:
+    if not _is_dict_list(value):
+        return False
+    for entry in value:
+        created_at = entry.get("created_at")
+        if (
+            not _is_finite_number(created_at)
+            or not _is_finite_number(entry.get("amount"))
+        ):
+            return False
+        try:
+            datetime.fromtimestamp(created_at)
+        except (OSError, OverflowError, TypeError, ValueError):
+            return False
+    return True
+
+
 def _is_field_list(value: object) -> bool:
     return _is_dict_list(value) and all(
         isinstance(field.get("key"), str)
@@ -218,9 +246,8 @@ def _validate_success_response(
     if valid and path == "/api/account/balance":
         balance = data.get("balance")
         valid = (
-            isinstance(balance, (int, float))
-            and not isinstance(balance, bool)
-            and _is_dict_list(data.get("ledger"))
+            _is_finite_number(balance)
+            and _is_ledger_list(data.get("ledger"))
             and isinstance(data.get("license_info"), dict)
         )
     elif valid and path.startswith(("/api/collect/", "/api/enrich/")):
@@ -339,6 +366,24 @@ def api_post(
 # ---------------------------------------------------------------------------
 # 输出：全量落盘 + stdout 摘要（防撑爆智能体上下文）
 # ---------------------------------------------------------------------------
+def prepare_output_dir(out_dir: str) -> Path:
+    """在付费请求前确认输出目录可创建且可真实写入。"""
+    out = Path(out_dir)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        if not out.is_dir():
+            raise NotADirectoryError(str(out))
+        with tempfile.TemporaryFile(dir=out):
+            pass
+    except OSError as exc:
+        raise CollectorError(
+            "INVALID_REQUEST",
+            f"输出目录不可写：{out}",
+            action="请更换可写的 --out-dir 后重新运行；本次采集请求尚未发送，不会扣费",
+        ) from exc
+    return out
+
+
 def _slug(text: str, max_len: int = 24) -> str:
     text = re.sub(r"[^0-9A-Za-z一-鿿_-]+", "_", str(text or "")).strip("_")
     return text[:max_len] or "data"
