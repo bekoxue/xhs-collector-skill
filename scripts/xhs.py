@@ -126,10 +126,23 @@ def run_collect(args) -> int:
         if seen_key and seen_ids:
             body["seen_ids"] = seen_ids
 
+    core.prepare_output_dir(args.out_dir)
     resp = core.api_post(
         SPEC, endpoint, body, expected_data_type=data_type
     )
-    paths = core.write_outputs(resp, args.out_dir, args.format, name_hint=ident or args.cmd)
+    try:
+        paths = core.write_outputs(
+            resp, args.out_dir, args.format, name_hint=ident or args.cmd
+        )
+    except OSError as exc:
+        raise core.CollectorError(
+            "INVALID_REQUEST",
+            f"采集结果已返回，但未能完整写入输出目录：{args.out_dir}",
+            action=(
+                "本次请求可能已扣费，请勿直接重新采集；请先运行 balance 查看流水，"
+                "确认后更换可写的 --out-dir，持续失败请联系客服微信 baojian_xue"
+            ),
+        ) from exc
     summary = resp.get("summary") or {}
     out = {
         "ok": True,
@@ -150,6 +163,7 @@ def run_collect(args) -> int:
     if resp.get("errors"):
         out["errors"] = resp["errors"]
 
+    warnings = []
     resume_spec = product.RESUME_SPECS.get(data_type)
     if resume_spec and out["has_more"] and hasattr(args, "resume_file"):
         patch = {}
@@ -164,21 +178,36 @@ def run_collect(args) -> int:
                 r.get(seen_key) for r in (resp.get("records") or []) if r.get(seen_key)
             ]
         resume_path = core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
-        core.save_resume(resume_path, patch, new_seen, context)
-        out["resume_hint"] = core.build_resume_hint(resume_path)
+        try:
+            core.save_resume(resume_path, patch, new_seen, context)
+        except OSError:
+            warnings.append(
+                "采集结果已保存，但断点文件写入失败；本次请求可能已扣费，请勿从头重采，"
+                "请先运行 balance 查看流水"
+            )
+        else:
+            out["resume_hint"] = core.build_resume_hint(resume_path)
     if summary.get("stop_reason") == "insufficient_balance":
-        out["warning"] = (
-            f"余额已耗尽，已保存本次采集的 {out['count']} 条结果（已扣费部分不会丢失）。"
-            "充值后用 resume_hint 中的命令续采，不会重复扣费。充值请添加微信 baojian_xue。"
-        )
+        if out.get("resume_hint"):
+            warnings.append(
+                f"余额已耗尽，已保存本次采集的 {out['count']} 条结果（已扣费部分不会丢失）。"
+                "充值后用 resume_hint 中的命令续采，不会重复扣费。充值请添加微信 baojian_xue。"
+            )
+        else:
+            warnings.append(
+                f"余额已耗尽，已保存本次采集的 {out['count']} 条结果，但断点文件未能保存。"
+                "请勿从头重采；请先运行 balance 查看流水并联系客服微信 baojian_xue。"
+            )
     elif summary.get("stop_reason") == "reached_request_limit":
         if out.get("resume_hint"):
-            out["warning"] = (
+            warnings.append(
                 "已达到单次请求的安全消费上限，本次结果和断点均已保存。"
                 "请运行 resume_hint 中的命令继续，续采不会重复请求已完成的数据。"
             )
         else:
-            out["warning"] = "已达到单次请求的安全消费上限，请分批继续采集。"
+            warnings.append("已达到单次请求的安全消费上限，请分批继续采集。")
+    if warnings:
+        out["warning"] = " ".join(warnings)
     core.emit(out, args.quiet)
     return core.EXIT_OK
 
