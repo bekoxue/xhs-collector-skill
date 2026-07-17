@@ -12,7 +12,10 @@ import json
 import os
 import platform
 import re
+import shlex
+import socket
 import stat
+import subprocess
 import sys
 import time
 import urllib.error
@@ -21,7 +24,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.0"
+SKILL_VERSION = "0.1.2"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -138,26 +141,36 @@ def device_name() -> str:
 # ---------------------------------------------------------------------------
 # HTTP
 # ---------------------------------------------------------------------------
-def _parse_error(status: int, body: bytes) -> CollectorError:
+def _parse_error(status: int, body: bytes, retry_after: int = 0) -> CollectorError:
     detail = None
     try:
         detail = json.loads(body.decode("utf-8", "replace")).get("detail")
     except Exception:
         pass
     if isinstance(detail, dict) and detail.get("code"):
-        return CollectorError(str(detail["code"]), str(detail.get("message") or ""))
+        return CollectorError(
+            str(detail["code"]), str(detail.get("message") or ""), retry_after
+        )
     message = detail if isinstance(detail, str) else f"HTTP {status}"
     fallback = {
         400: "INVALID_REQUEST", 401: "INVALID_TOKEN", 402: "INSUFFICIENT_BALANCE",
         403: "LICENSE_INVALID", 429: "RATE_LIMITED",
     }
     code = fallback.get(status, "SERVICE_UNAVAILABLE" if status >= 500 else "INVALID_REQUEST")
-    return CollectorError(code, message)
+    return CollectorError(code, message, retry_after)
+
+
+def _retry_after_seconds(value: str | None) -> int:
+    """解析服务端 Retry-After 秒数，并限制最长自动等待时间。"""
+    try:
+        return min(300, max(1, int(value or "0")))
+    except (TypeError, ValueError):
+        return 0
 
 
 def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int = 180) -> dict:
-    """POST JSON。重试策略：仅对「确定未扣费」的失败（连接类错误 / 429）自动重试，
-    读超时不重试（服务端可能已完成采集并扣费），避免重复扣费。"""
+    """POST JSON。仅对「确定请求未到服务端」的连接失败和 429 自动重试；
+    超时、连接重置等结果不明的错误不重试，避免服务端已扣费后重复调用。"""
     url = resolve_base_url(spec) + path
     key = api_key or resolve_api_key(spec)
     if not key:
@@ -178,9 +191,10 @@ def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int 
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            err = _parse_error(e.code, e.read())
+            retry_after = _retry_after_seconds((e.headers or {}).get("Retry-After"))
+            err = _parse_error(e.code, e.read(), retry_after)
             if err.code == "RATE_LIMITED" and attempts <= 2:
-                time.sleep(min(60, 15 * attempts))
+                time.sleep(err.retry_after or min(60, 15 * attempts))
                 continue
             raise err
         except urllib.error.URLError as e:
@@ -190,10 +204,15 @@ def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int 
                     "SERVICE_UNAVAILABLE",
                     "请求超时。注意：服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试（分页命令可用 --resume-file 续采）",
                 )
-            if attempts <= 2:  # 连接被拒/DNS 失败等：确定未扣费，可安全重试
+            # 只有 DNS 解析失败、连接被拒绝能确认请求尚未到达服务端，可安全重试。
+            # 连接重置等错误可能发生在服务端完成采集之后，自动重试会造成重复扣费。
+            if isinstance(reason, (socket.gaierror, ConnectionRefusedError)) and attempts <= 2:
                 time.sleep(2 * attempts)
                 continue
-            raise CollectorError("SERVICE_UNAVAILABLE", f"无法连接采集服务：{reason}")
+            raise CollectorError(
+                "SERVICE_UNAVAILABLE",
+                f"连接采集服务失败：{reason}。服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+            )
         except TimeoutError:
             raise CollectorError(
                 "SERVICE_UNAVAILABLE",
@@ -264,7 +283,9 @@ def balance_yuan(resp: dict):
 def emit(obj: dict, quiet: bool = False) -> None:
     if quiet:
         slim = {k: v for k, v in obj.items() if k in (
-            "ok", "count", "output_json", "output_csv", "error_code", "message", "resume_hint",
+            "ok", "count", "requested", "skipped_insufficient", "skipped_request_limit",
+            "stop_reason", "has_more", "output_json", "output_csv", "error_code", "message",
+            "warning", "resume_hint",
         )}
         print(json.dumps(slim, ensure_ascii=False))
     else:
@@ -312,7 +333,9 @@ def build_resume_hint(resume_path: Path) -> str:
         i = argv.index("--resume-file")
         del argv[i:i + 2]
     parts = ["python3", sys.argv[0]] + argv + ["--resume-file", str(resume_path)]
-    return " ".join(parts)
+    if os.name == "nt":
+        return subprocess.list2cmdline(parts)
+    return shlex.join(parts)
 
 
 # ---------------------------------------------------------------------------

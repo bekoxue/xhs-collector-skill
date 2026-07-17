@@ -25,4 +25,3 @@ npx skills add bekoxue/xhs-collector-skill --skill xhs-collector -g -a openclaw 
 - Python 3.9+，无需安装第三方 Python 依赖
 - 宿主机执行，不支持 Docker、容器或云沙箱
 - 一个令牌仅绑定一台设备
-

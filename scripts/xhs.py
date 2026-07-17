@@ -27,12 +27,15 @@ import product_xhs as product
 SPEC = product.SPEC
 
 
-def add_common(p: argparse.ArgumentParser, paginated: bool = False) -> None:
+def add_common(
+    p: argparse.ArgumentParser, paginated: bool = False, resumable: bool = False
+) -> None:
     p.add_argument("--out-dir", default=SPEC["default_out_dir"], help="结果输出目录")
     p.add_argument("--format", choices=("json", "csv", "both"), default="json")
     p.add_argument("--quiet", action="store_true", help="只输出最精简的一行 JSON")
     if paginated:
         p.add_argument("--max-pages", type=int, default=1, help="本次最多采集页数（每页计费一次，默认 1）")
+    if paginated or resumable:
         p.add_argument("--resume-file", default="", help="断点续采文件（上次输出的 resume_hint 会带上）")
 
 
@@ -83,11 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("replies", help="指定评论的楼中楼回复")
     p.add_argument("input", help="笔记链接 / note_id")
     p.add_argument("--parent-ids", required=True, help="父评论 ID，逗号分隔")
-    add_common(p)
+    add_common(p, resumable=True)
 
     p = sub.add_parser("enrich", help="批量补全笔记互动数据")
     p.add_argument("--ids", required=True, help="note_id 列表，逗号分隔")
-    add_common(p)
+    add_common(p, resumable=True)
     return ap
 
 
@@ -103,8 +106,8 @@ COMMANDS = {
               lambda a: a.name, "topic_notes"),
     "comments": ("/api/collect/comments", product.comments_body,
                  lambda a: a.input, "comments"),
-    "replies": ("/api/collect/comment_replies", product.replies_body, None, "comments"),
-    "enrich": ("/api/enrich/notes", product.enrich_body, None, "image_note"),
+    "replies": ("/api/collect/comment_replies", product.replies_body, None, "comment_replies"),
+    "enrich": ("/api/enrich/notes", product.enrich_body, None, "enrich_notes"),
 }
 
 
@@ -130,6 +133,11 @@ def run_collect(args) -> int:
         "data_type": resp.get("data_type") or data_type,
         "count": summary.get("count", len(resp.get("records") or [])),
         **({"pages": summary["pages"]} if "pages" in summary else {}),
+        **({"requested": summary["requested"]} if "requested" in summary else {}),
+        **({"skipped_insufficient": summary["skipped_insufficient"]}
+           if "skipped_insufficient" in summary else {}),
+        **({"skipped_request_limit": summary["skipped_request_limit"]}
+           if "skipped_request_limit" in summary else {}),
         "stop_reason": summary.get("stop_reason"),
         "has_more": bool(summary.get("has_more") or summary.get("can_continue")),
         **paths,
@@ -140,7 +148,7 @@ def run_collect(args) -> int:
         out["errors"] = resp["errors"]
 
     resume_spec = product.RESUME_SPECS.get(data_type)
-    if resume_spec and out["has_more"] and getattr(args, "max_pages", None) is not None:
+    if resume_spec and out["has_more"] and hasattr(args, "resume_file"):
         patch = {}
         for summary_field, request_field in resume_spec.items():
             value = summary.get(summary_field)
@@ -160,6 +168,14 @@ def run_collect(args) -> int:
             f"余额已耗尽，已保存本次采集的 {out['count']} 条结果（已扣费部分不会丢失）。"
             "充值后用 resume_hint 中的命令续采，不会重复扣费。充值请添加微信 baojian_xue。"
         )
+    elif summary.get("stop_reason") == "reached_request_limit":
+        if out.get("resume_hint"):
+            out["warning"] = (
+                "已达到单次请求的安全消费上限，本次结果和断点均已保存。"
+                "请运行 resume_hint 中的命令继续，续采不会重复请求已完成的数据。"
+            )
+        else:
+            out["warning"] = "已达到单次请求的安全消费上限，请分批继续采集。"
     core.emit(out, args.quiet)
     return core.EXIT_OK
 

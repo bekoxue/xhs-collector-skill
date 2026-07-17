@@ -101,8 +101,12 @@ RESUME_SPECS = {
         "next_cursor": "resume_cursor",
         "next_index": "resume_index",
         "next_page_area": "resume_page_area",
+        "resume_replies": "resume_replies",
+        "resume_top_has_more": "resume_top_has_more",
     },
+    "comment_replies": {"resume_replies": "resume_replies"},
+    "enrich_notes": {"remaining_ids": "note_ids"},
 }
 
 # 需要客户端累积去重 ID 的命令：data_type → 记录里的 ID 字段
-SEEN_ID_KEYS = {"comments": "comment_id"}
+SEEN_ID_KEYS = {"comments": "comment_id", "comment_replies": "comment_id"}

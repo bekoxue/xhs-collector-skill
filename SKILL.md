@@ -56,7 +56,7 @@ OpenClaw 用户的替代方式：在 `~/.openclaw/openclaw.json` 的 `skills.ent
 ## 消费护栏
 
 - 分页命令默认 `--max-pages 1`（每页约 20 条）。用户要「采全部」时：先按预估页数说明大致费用（每页约 0.025 元）并得到确认，再分批增加页数。服务端另有单次 10 页上限与每分钟请求频率限制兜底。
-- 一次采集失败不要自动重试超过脚本内置的重试（脚本已对安全场景自动重试）；读超时时脚本会提示先查流水，遵照提示执行。
+- 一次采集失败不要自动重试超过脚本内置的重试（脚本仅对确定尚未到达服务端的安全场景自动重试）；超时、连接重置等结果不明时按脚本提示先查流水，再决定是否续采。
 
 ## 输出约定（重要：防止上下文爆炸）
 
@@ -67,6 +67,8 @@ OpenClaw 用户的替代方式：在 `~/.openclaw/openclaw.json` 的 `skills.ent
 ## 断点续采
 
 - 摘要中 `has_more: true` 时，`resume_hint` 给出可直接执行的续采命令（自动携带 `--resume-file`，含去重状态，不会重复采集或重复扣费）。
+- `comments`、`replies` 会保存未完成的楼中楼游标，`enrich` 会保存超过单次护栏的剩余笔记 ID。
+- `stop_reason: reached_request_limit` 表示达到单请求安全消费上限，不代表余额不足；直接执行 `resume_hint` 继续。
 - `stop_reason: insufficient_balance` 表示余额中途耗尽：**已采集的记录已保存且已扣费部分不丢失**，提醒用户充值（微信 baojian_xue）后用 resume_hint 续采。
 
 ## 错误处理
@@ -80,7 +82,7 @@ OpenClaw 用户的替代方式：在 `~/.openclaw/openclaw.json` 的 `skills.ent
 | `TOKEN_DEVICE_MISMATCH` | 令牌已绑定其他设备 | 用户换了电脑：引导到网页端「我的账户→智能体接入」点「解绑设备」，或重新生成令牌 |
 | `LICENSE_INVALID` | 激活码未绑定/过期 | 引导登录网页平台绑定或续费激活码 |
 | `RATE_LIMITED` | 频率超限 | 按 message 中的秒数等待后重试 |
-| `SERVICE_UNAVAILABLE` | 服务不可用/网络异常 | 稍后重试；持续失败让用户联系客服微信 baojian_xue |
+| `SERVICE_UNAVAILABLE` | 服务不可用/网络异常 | 遵照 message；若提示结果不明，先查 balance 流水再决定是否重试；持续失败联系客服微信 baojian_xue |
 | `INVALID_REQUEST` | 参数错误 | 按 message 修正参数 |
 
 ## 参考资料
