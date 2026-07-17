@@ -25,7 +25,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.3"
+SKILL_VERSION = "0.1.4"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -61,13 +61,24 @@ _CODE_ACTION = {
     "INVALID_REQUEST": "请检查命令参数后重试",
 }
 
+_RESULT_UNKNOWN_ACTION = (
+    "请先运行 balance 查看最近流水，确认本次请求是否已扣费，再决定是否重试；"
+    "持续失败请联系客服微信 baojian_xue"
+)
+_BALANCE_UNAVAILABLE_ACTION = (
+    "余额查询暂不可用，请稍后重试；持续失败请联系客服微信 baojian_xue"
+)
+
 
 class CollectorError(Exception):
-    def __init__(self, code: str, message: str, retry_after: int = 0):
+    def __init__(
+        self, code: str, message: str, retry_after: int = 0, action: str | None = None
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.retry_after = retry_after
+        self._action = action
 
     @property
     def exit_code(self) -> int:
@@ -75,7 +86,7 @@ class CollectorError(Exception):
 
     @property
     def action(self) -> str:
-        return _CODE_ACTION.get(self.code, "")
+        return self._action if self._action is not None else _CODE_ACTION.get(self.code, "")
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +180,80 @@ def _retry_after_seconds(value: str | None) -> int:
         return 0
 
 
-def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int = 180) -> dict:
+def _result_unknown(message: str) -> CollectorError:
+    return CollectorError(
+        "SERVICE_UNAVAILABLE", message, action=_RESULT_UNKNOWN_ACTION
+    )
+
+
+def _response_failure(
+    path: str, collection_message: str, balance_message: str
+) -> CollectorError:
+    if path == "/api/account/balance":
+        return CollectorError(
+            "SERVICE_UNAVAILABLE",
+            balance_message,
+            action=_BALANCE_UNAVAILABLE_ACTION,
+        )
+    return _result_unknown(collection_message)
+
+
+def _is_dict_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, dict) for item in value)
+
+
+def _is_field_list(value: object) -> bool:
+    return _is_dict_list(value) and all(
+        isinstance(field.get("key"), str)
+        and bool(field["key"].strip())
+        and (field.get("label") is None or isinstance(field.get("label"), str))
+        for field in value
+    )
+
+
+def _validate_success_response(
+    path: str, data: object, expected_data_type: str = ""
+) -> dict:
+    valid = isinstance(data, dict) and data.get("ok") is True
+    if valid and path == "/api/account/balance":
+        balance = data.get("balance")
+        valid = (
+            isinstance(balance, (int, float))
+            and not isinstance(balance, bool)
+            and _is_dict_list(data.get("ledger"))
+            and isinstance(data.get("license_info"), dict)
+        )
+    elif valid and path.startswith(("/api/collect/", "/api/enrich/")):
+        fields = data.get("fields")
+        valid = (
+            isinstance(data.get("data_type"), str)
+            and bool(data.get("data_type"))
+            and (
+                not expected_data_type
+                or data.get("data_type") == expected_data_type
+            )
+            and _is_dict_list(data.get("records"))
+            and (fields is None or _is_field_list(fields))
+            and isinstance(data.get("summary"), dict)
+        )
+    if not valid:
+        raise _response_failure(
+            path,
+            "服务响应结构异常。注意：服务端可能已完成采集并扣费，请先运行 "
+            "balance 查看流水再决定是否重试",
+            "余额查询服务响应结构异常，请稍后重试",
+        )
+    return data
+
+
+def api_post(
+    spec: dict,
+    path: str,
+    body: dict,
+    api_key: str = "",
+    timeout: int = 180,
+    expected_data_type: str = "",
+) -> dict:
     """POST JSON。仅对「确定请求未到服务端」的连接失败和 429 自动重试；
     超时、连接重置等结果不明的错误不重试，避免服务端已扣费后重复调用。"""
     url = resolve_base_url(spec) + path
@@ -190,39 +274,65 @@ def api_post(spec: dict, path: str, body: dict, api_key: str = "", timeout: int 
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                data = json.loads(resp.read().decode("utf-8"))
+                return _validate_success_response(path, data, expected_data_type)
         except urllib.error.HTTPError as e:
             retry_after = _retry_after_seconds((e.headers or {}).get("Retry-After"))
-            err = _parse_error(e.code, e.read(), retry_after)
-            if err.code == "RATE_LIMITED" and attempts <= 2:
+            try:
+                error_body = e.read()
+            except (OSError, http.client.HTTPException) as read_error:
+                raise _response_failure(
+                    path,
+                    f"读取采集服务错误响应时连接中断：{read_error}。服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+                    f"读取余额查询错误响应时连接中断：{read_error}，请稍后重试",
+                )
+            err = _parse_error(e.code, error_body, retry_after)
+            if e.code == 429 and err.code == "RATE_LIMITED" and attempts <= 2:
                 time.sleep(err.retry_after or min(60, 15 * attempts))
                 continue
+            if e.code >= 500:
+                raise _response_failure(
+                    path,
+                    "采集服务返回异常。注意：服务端可能已完成采集并扣费，请先运行 "
+                    "balance 查看流水再决定是否重试",
+                    "余额查询服务暂时不可用，请稍后重试",
+                )
             raise err
         except (UnicodeDecodeError, json.JSONDecodeError, http.client.IncompleteRead):
-            raise CollectorError(
-                "SERVICE_UNAVAILABLE",
+            raise _response_failure(
+                path,
                 "服务响应内容异常。注意：服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+                "余额查询服务响应内容异常，请稍后重试",
             )
         except urllib.error.URLError as e:
             reason = getattr(e, "reason", e)
             if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
-                raise CollectorError(
-                    "SERVICE_UNAVAILABLE",
+                raise _response_failure(
+                    path,
                     "请求超时。注意：服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试（分页命令可用 --resume-file 续采）",
+                    "余额查询请求超时，请稍后重试",
                 )
             # 只有 DNS 解析失败、连接被拒绝能确认请求尚未到达服务端，可安全重试。
             # 连接重置等错误可能发生在服务端完成采集之后，自动重试会造成重复扣费。
             if isinstance(reason, (socket.gaierror, ConnectionRefusedError)) and attempts <= 2:
                 time.sleep(2 * attempts)
                 continue
-            raise CollectorError(
-                "SERVICE_UNAVAILABLE",
+            raise _response_failure(
+                path,
                 f"连接采集服务失败：{reason}。服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+                f"连接余额查询服务失败：{reason}，请稍后重试",
             )
         except TimeoutError:
-            raise CollectorError(
-                "SERVICE_UNAVAILABLE",
+            raise _response_failure(
+                path,
                 "请求超时。注意：服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+                "余额查询请求超时，请稍后重试",
+            )
+        except (OSError, http.client.HTTPException) as e:
+            raise _response_failure(
+                path,
+                f"读取采集结果时发生网络或协议异常：{e}。服务端可能已完成采集并扣费，请先运行 balance 查看流水再决定是否重试",
+                f"读取余额查询结果时发生网络或协议异常：{e}，请稍后重试",
             )
 
 
@@ -301,7 +411,7 @@ def emit(obj: dict, quiet: bool = False) -> None:
         slim = {k: v for k, v in obj.items() if k in (
             "ok", "count", "requested", "skipped_insufficient", "skipped_request_limit",
             "stop_reason", "has_more", "output_json", "output_csv", "error_code", "message",
-            "warning", "resume_hint",
+            "action", "warning", "resume_hint",
         )}
         print(json.dumps(slim, ensure_ascii=False))
     else:
@@ -325,22 +435,49 @@ def resume_file_path(out_dir: str, data_type: str, ident: str) -> Path:
     return Path(out_dir) / f".resume_{data_type}_{_slug(ident)}.json"
 
 
-def save_resume(path: Path, request_patch: dict, seen_ids: list) -> None:
+def resume_context(command: str, data_type: str, request_body: dict) -> dict:
+    canonical = json.dumps(
+        request_body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return {
+        "version": 1,
+        "command": command,
+        "data_type": data_type,
+        "request_fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+    }
+
+
+def save_resume(
+    path: Path, request_patch: dict, seen_ids: list, context: dict
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
+        "context": context,
         "request_patch": request_patch,
         "seen_ids": seen_ids,
         "saved_at": int(time.time()),
     }, ensure_ascii=False), encoding="utf-8")
 
 
-def load_resume(path: str) -> dict:
+def load_resume(path: str, expected_context: dict) -> dict:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise CollectorError("INVALID_REQUEST", f"续采文件不存在：{path}")
     except Exception:
         raise CollectorError("INVALID_REQUEST", f"续采文件损坏，请重新采集：{path}")
+    if not isinstance(data, dict):
+        raise CollectorError("INVALID_REQUEST", f"续采文件损坏，请重新采集：{path}")
+    if data.get("context") != expected_context:
+        raise CollectorError(
+            "INVALID_REQUEST",
+            "续采文件与当前命令或采集对象不匹配，请使用本任务生成的 resume_hint",
+        )
+    if not isinstance(data.get("request_patch"), dict) or not data["request_patch"]:
+        raise CollectorError("INVALID_REQUEST", "续采文件没有有效断点，请重新发起采集")
+    if not isinstance(data.get("seen_ids"), list):
+        raise CollectorError("INVALID_REQUEST", f"续采文件损坏，请重新采集：{path}")
+    return data
 
 
 def build_resume_hint(resume_path: Path) -> str:

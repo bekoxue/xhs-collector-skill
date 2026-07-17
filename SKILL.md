@@ -82,7 +82,7 @@ OpenClaw 用户的替代方式：在 `~/.openclaw/openclaw.json` 的 `skills.ent
 | `TOKEN_DEVICE_MISMATCH` | 令牌已绑定其他设备 | 用户换了电脑：引导到网页端「我的账户→智能体接入」点「解绑设备」，或重新生成令牌 |
 | `LICENSE_INVALID` | 激活码未绑定/过期 | 引导登录网页平台绑定或续费激活码 |
 | `RATE_LIMITED` | 频率超限 | 按 message 中的秒数等待后重试 |
-| `SERVICE_UNAVAILABLE` | 服务不可用/网络异常 | 遵照 message；若提示结果不明，先查 balance 流水再决定是否重试；持续失败联系客服微信 baojian_xue |
+| `SERVICE_UNAVAILABLE` | 服务不可用/网络异常 | 遵照 action；结果不明时 action 会要求先查 balance 流水，不要直接重试；持续失败联系客服微信 baojian_xue |
 | `INVALID_REQUEST` | 参数错误 | 按 message 修正参数 |
 
 ## 参考资料
