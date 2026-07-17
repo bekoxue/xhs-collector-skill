@@ -115,17 +115,20 @@ def run_collect(args) -> int:
     endpoint, body_fn, ident_fn, data_type = COMMANDS[args.cmd]
     body = body_fn(args)
     ident = ident_fn(args) if ident_fn else ""
+    context = core.resume_context(args.cmd, data_type, body)
 
     seen_ids: list = []
     if getattr(args, "resume_file", ""):
-        saved = core.load_resume(args.resume_file)
+        saved = core.load_resume(args.resume_file, context)
         body.update(saved.get("request_patch") or {})
         seen_ids = saved.get("seen_ids") or []
         seen_key = product.SEEN_ID_KEYS.get(data_type)
         if seen_key and seen_ids:
             body["seen_ids"] = seen_ids
 
-    resp = core.api_post(SPEC, endpoint, body)
+    resp = core.api_post(
+        SPEC, endpoint, body, expected_data_type=data_type
+    )
     paths = core.write_outputs(resp, args.out_dir, args.format, name_hint=ident or args.cmd)
     summary = resp.get("summary") or {}
     out = {
@@ -161,7 +164,7 @@ def run_collect(args) -> int:
                 r.get(seen_key) for r in (resp.get("records") or []) if r.get(seen_key)
             ]
         resume_path = core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
-        core.save_resume(resume_path, patch, new_seen)
+        core.save_resume(resume_path, patch, new_seen, context)
         out["resume_hint"] = core.build_resume_hint(resume_path)
     if summary.get("stop_reason") == "insufficient_balance":
         out["warning"] = (
