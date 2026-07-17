@@ -27,7 +27,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-SKILL_VERSION = "0.1.5"
+SKILL_VERSION = "0.1.6"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -287,7 +287,7 @@ def api_post(
     key = api_key or resolve_api_key(spec)
     if not key:
         raise CollectorError("INVALID_TOKEN", "尚未配置令牌，请先运行 configure 命令")
-    payload = json.dumps(body, ensure_ascii=False).encode()
+    payload = json.dumps(body, ensure_ascii=True).encode()
     headers = {
         "Content-Type": "application/json",
         "X-Api-Key": key,
@@ -375,7 +375,7 @@ def prepare_output_dir(out_dir: str) -> Path:
             raise NotADirectoryError(str(out))
         with tempfile.TemporaryFile(dir=out):
             pass
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise CollectorError(
             "INVALID_REQUEST",
             f"输出目录不可写：{out}",
@@ -393,17 +393,22 @@ def write_outputs(resp: dict, out_dir: str, fmt: str, name_hint: str = "") -> di
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     data_type = resp.get("data_type") or "result"
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"{data_type}_{_slug(name_hint)}_{ts}" if name_hint else f"{data_type}_{ts}"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    unique = uuid.uuid4().hex
+    prefix = f"{data_type}_{_slug(name_hint)}" if name_hint else data_type
+    base = f"{prefix}_{ts}_{unique}"
     paths = {}
     if fmt in ("json", "both"):
         p = out / f"{base}.json"
-        p.write_text(json.dumps({
-            "data_type": data_type,
-            "fields": resp.get("fields") or [],
-            "records": resp.get("records") or [],
-            "summary": resp.get("summary") or {},
-        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        with p.open(
+            "x", encoding="utf-8", errors="backslashreplace"
+        ) as fh:
+            json.dump({
+                "data_type": data_type,
+                "fields": resp.get("fields") or [],
+                "records": resp.get("records") or [],
+                "summary": resp.get("summary") or {},
+            }, fh, ensure_ascii=False, indent=1)
         paths["output_json"] = str(p)
     if fmt in ("csv", "both"):
         fields = resp.get("fields") or []
@@ -413,7 +418,9 @@ def write_outputs(resp: dict, out_dir: str, fmt: str, name_hint: str = "") -> di
         )
         labels = {f.get("key"): f.get("label") or f.get("key") for f in fields}
         p = out / f"{base}.csv"
-        with p.open("w", newline="", encoding="utf-8-sig") as fh:
+        with p.open(
+            "x", newline="", encoding="utf-8-sig", errors="backslashreplace"
+        ) as fh:
             w = csv.writer(fh)
             w.writerow([labels.get(k, k) for k in keys])
             for r in records:
@@ -458,9 +465,15 @@ def emit(obj: dict, quiet: bool = False) -> None:
             "stop_reason", "has_more", "output_json", "output_csv", "error_code", "message",
             "action", "warning", "resume_hint",
         )}
-        print(json.dumps(slim, ensure_ascii=False))
+        rendered = json.dumps(slim, ensure_ascii=False)
+        fallback = json.dumps(slim, ensure_ascii=True)
     else:
-        print(json.dumps(obj, ensure_ascii=False, indent=1))
+        rendered = json.dumps(obj, ensure_ascii=False, indent=1)
+        fallback = json.dumps(obj, ensure_ascii=True, indent=1)
+    try:
+        print(rendered)
+    except UnicodeEncodeError:
+        print(fallback)
 
 
 def emit_error(err: CollectorError, quiet: bool = False) -> int:
@@ -488,7 +501,9 @@ def resume_context(command: str, data_type: str, request_body: dict) -> dict:
         "version": 1,
         "command": command,
         "data_type": data_type,
-        "request_fingerprint": hashlib.sha256(canonical.encode()).hexdigest(),
+        "request_fingerprint": hashlib.sha256(
+            canonical.encode("utf-8", errors="surrogatepass")
+        ).hexdigest(),
     }
 
 
@@ -496,12 +511,16 @@ def save_resume(
     path: Path, request_patch: dict, seen_ids: list, context: dict
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "context": context,
-        "request_patch": request_patch,
-        "seen_ids": seen_ids,
-        "saved_at": int(time.time()),
-    }, ensure_ascii=False), encoding="utf-8")
+    path.write_text(
+        json.dumps({
+            "context": context,
+            "request_patch": request_patch,
+            "seen_ids": seen_ids,
+            "saved_at": int(time.time()),
+        }, ensure_ascii=False),
+        encoding="utf-8",
+        errors="backslashreplace",
+    )
 
 
 def load_resume(path: str, expected_context: dict) -> dict:

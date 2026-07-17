@@ -134,7 +134,7 @@ def run_collect(args) -> int:
         paths = core.write_outputs(
             resp, args.out_dir, args.format, name_hint=ident or args.cmd
         )
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise core.CollectorError(
             "INVALID_REQUEST",
             f"采集结果已返回，但未能完整写入输出目录：{args.out_dir}",
@@ -180,7 +180,7 @@ def run_collect(args) -> int:
         resume_path = core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
         try:
             core.save_resume(resume_path, patch, new_seen, context)
-        except OSError:
+        except (OSError, UnicodeError):
             warnings.append(
                 "采集结果已保存，但断点文件写入失败；本次请求可能已扣费，请勿从头重采，"
                 "请先运行 balance 查看流水"
