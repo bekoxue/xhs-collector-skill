@@ -1,8 +1,14 @@
 # 小红书采集助手 Skill
 
-适用于 Claude Code、OpenClaw 等支持 Agent Skills 的智能体，可通过自然语言采集小红书公开数据。
+适用于 Codex、Claude Code、OpenClaw 等支持 Agent Skills 的智能体，可通过自然语言采集小红书公开数据。
 
 ## 一键安装
+
+Codex：
+
+```bash
+npx skills add bekoxue/xhs-collector-skill --skill xhs-collector -g -a codex -y
+```
 
 Claude Code：
 
