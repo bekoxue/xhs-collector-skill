@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import uuid
 from pathlib import Path
 
 import collector_core as core
@@ -119,18 +120,55 @@ def run_collect(args) -> int:
     context = core.resume_context(args.cmd, data_type, body)
 
     seen_ids: list = []
+    saved_request_patch: dict = {}
     if getattr(args, "resume_file", ""):
         saved = core.load_resume(args.resume_file, context)
-        body.update(saved.get("request_patch") or {})
+        saved_request_patch = saved.get("request_patch") or {}
+        body.update(saved_request_patch)
         seen_ids = saved.get("seen_ids") or []
         seen_key = product.SEEN_ID_KEYS.get(data_type)
         if seen_key and seen_ids:
             body["seen_ids"] = seen_ids
 
     core.prepare_output_dir(args.out_dir)
-    resp = core.api_post(
-        SPEC, endpoint, body, expected_data_type=data_type
-    )
+    operation_path = None
+    if args.cmd == "enrich":
+        operation_path = (
+            Path(args.resume_file)
+            if getattr(args, "resume_file", "")
+            else core.resume_file_path(args.out_dir, data_type, ident or args.cmd)
+        )
+        body.setdefault("idempotency_key", uuid.uuid4().hex)
+        # 计费请求前先持久化操作键。即使响应丢失，也能用同一 resume_hint
+        # 找回服务端原任务，而不是创建第二个任务。
+        operation_patch = {
+            **saved_request_patch,
+            "idempotency_key": body["idempotency_key"],
+        }
+        try:
+            core.save_resume(operation_path, operation_patch, seen_ids, context)
+        except (OSError, UnicodeError) as exc:
+            raise core.CollectorError(
+                "INVALID_REQUEST",
+                f"无法保存详情任务恢复文件：{operation_path}",
+                action="请求尚未发送，不会扣费；请更换可写的 --out-dir 后重试",
+            ) from exc
+    try:
+        resp = core.api_post(
+            SPEC, endpoint, body, expected_data_type=data_type
+        )
+    except core.CollectorError as exc:
+        if operation_path:
+            raise core.CollectorError(
+                exc.code,
+                exc.message,
+                retry_after=exc.retry_after,
+                action=(
+                    f"{exc.action}；确认或恢复本次详情任务请执行："
+                    f"{core.build_resume_hint(operation_path)}"
+                ),
+            ) from exc
+        raise
     try:
         paths = core.write_outputs(
             resp, args.out_dir, args.format, name_hint=ident or args.cmd
@@ -161,6 +199,8 @@ def run_collect(args) -> int:
         "balance_yuan": core.balance_yuan(resp),
         "preview": core.build_preview(resp),
     }
+    if operation_path:
+        out["operation_file"] = str(operation_path)
     if resp.get("errors"):
         out["errors"] = resp["errors"]
 
@@ -172,13 +212,16 @@ def run_collect(args) -> int:
             value = summary.get(summary_field)
             if value not in (None, ""):
                 patch[request_field] = value
+        if args.cmd == "enrich":
+            # 剩余 ID 属于下一次付费操作，必须使用新的幂等键。
+            patch["idempotency_key"] = uuid.uuid4().hex
         seen_key = product.SEEN_ID_KEYS.get(data_type)
         new_seen = seen_ids
         if seen_key:
             new_seen = seen_ids + [
                 r.get(seen_key) for r in (resp.get("records") or []) if r.get(seen_key)
             ]
-        resume_path = (
+        resume_path = operation_path or (
             Path(args.resume_file)
             if getattr(args, "resume_file", "")
             else core.resume_file_path(args.out_dir, data_type, ident or args.cmd)

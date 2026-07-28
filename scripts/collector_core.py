@@ -26,8 +26,9 @@ import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
-SKILL_VERSION = "0.1.7"
+SKILL_VERSION = "0.1.9"
 
 # 退出码约定（SKILL.md 同步维护）
 EXIT_OK = 0
@@ -127,12 +128,39 @@ def resolve_api_key(spec: dict) -> str:
     return (load_config(spec).get("api_key") or "").strip()
 
 
+def _safe_local_base_url(value: str) -> str:
+    candidate = value.strip().rstrip("/")
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return candidate
+
+
 def resolve_base_url(spec: dict) -> str:
-    """生产地址写死；仅显式开发模式允许 localhost 覆盖（防止对话内容诱导改地址）。"""
-    if os.environ.get("COLLECTOR_DEV_MODE") == "1":
-        dev = (os.environ.get("COLLECTOR_BASE_URL") or "").strip().rstrip("/")
-        if dev.startswith("http://127.0.0.1") or dev.startswith("http://localhost"):
+    """生产地址写死；显式本地配置可持久化，且只能指向本机 HTTP 服务。"""
+    dev_mode = os.environ.get("COLLECTOR_DEV_MODE")
+    if dev_mode == "0":
+        return spec["base_url"]
+    if dev_mode == "1":
+        dev = _safe_local_base_url(os.environ.get("COLLECTOR_BASE_URL") or "")
+        if dev:
             return dev
+    saved = ""
+    if spec.get("config_dir"):
+        saved = _safe_local_base_url(load_config(spec).get("dev_base_url") or "")
+    if saved:
+        return saved
     return spec["base_url"]
 
 
@@ -584,12 +612,18 @@ def cmd_configure(spec: dict, api_key: str = "", quiet: bool = False) -> int:
         resp = api_post(spec, "/api/account/balance", {}, api_key=key)
     except CollectorError as e:
         return emit_error(e, quiet)
-    save_config(spec, {"api_key": key, "product": spec["product"]})
+    active_base_url = resolve_base_url(spec)
+    config = {"api_key": key, "product": spec["product"]}
+    if active_base_url != spec["base_url"]:
+        config["dev_base_url"] = active_base_url
+    save_config(spec, config)
     info = resp.get("license_info") or {}
     emit({
         "ok": True,
         "message": f"配置完成，令牌已绑定本机（{device_name()}）",
         "config_file": str(config_path(spec)),
+        "environment": "local_test" if active_base_url != spec["base_url"] else "production",
+        "service_url": active_base_url,
         "balance_yuan": balance_yuan(resp),
         "license_status": info.get("status") or ("有效" if info.get("valid") else "未知"),
         "license_expires_at": info.get("expires_at") or "",

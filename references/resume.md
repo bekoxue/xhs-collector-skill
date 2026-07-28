@@ -18,7 +18,7 @@
 | topic | `cursor_score` + `last_note_id` + `last_note_ct` + `session_id` + `first_load_time` |
 | comments | 主评论 `resume_cursor` + `resume_index` + `resume_page_area`，楼中楼 `resume_replies` + `resume_top_has_more`，以及 `seen_ids` 去重列表 |
 | replies | `resume_replies`（未完成父评论的回复 cursor / index）+ `seen_ids` 去重列表 |
-| enrich | `note_ids`（超过单请求护栏或余额范围的剩余 ID） |
+| enrich | 请求前保存本次操作的 `idempotency_key`；成功后保存超过单请求护栏或余额范围的剩余 `note_ids` 及下一批的新幂等键 |
 
 ## 余额中断的续采
 
@@ -37,3 +37,4 @@
 - 续采文件保存在输出目录下（`.resume_` 前缀的隐藏文件），采集任务彻底完成后可以删除
 - 每次初始采集使用独立断点文件，避免同关键词、同博主或 replies / enrich 任务互相覆盖
 - 每次续采成功后原子更新传入的同一文件，始终指向最新断点；不要并发执行同一个 `resume_hint`
+- enrich 的操作文件会在计费请求前创建；结果未知时复用它可以查询同一服务端任务，删除 `--resume-file` 会被视为新的付费操作

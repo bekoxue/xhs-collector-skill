@@ -35,6 +35,20 @@ python3 ~/.claude/skills/xhs-collector/scripts/xhs.py configure
 
 3. 重启 Claude Code 会话，直接说「帮我采集小红书 xxx」即可。
 
+## 本地开发测试
+
+生产用户跳过本节。若令牌来自 `http://127.0.0.1:8765/`，请用下面的命令配置：
+
+```bash
+COLLECTOR_DEV_MODE=1 COLLECTOR_BASE_URL=http://127.0.0.1:8765 python3 ~/.claude/skills/xhs-collector/scripts/xhs.py configure
+```
+
+成功后本地地址会被保存，后续可直接使用普通采集命令。本地与线上令牌、余额相互隔离；本地令牌请求线上域名会提示无效。要切回线上，请使用线上页面新生成的令牌运行：
+
+```bash
+COLLECTOR_DEV_MODE=0 python3 ~/.claude/skills/xhs-collector/scripts/xhs.py configure
+```
+
 ## OpenClaw 安装
 
 1. 如未使用 GitHub 一键安装，把 `xhs-collector` 文件夹解压到 `~/.openclaw/skills/`（或工作区的 `skills/` 目录）
@@ -59,5 +73,6 @@ python3 ~/.claude/skills/xhs-collector/scripts/xhs.py configure
 
 - **令牌提示已绑定其他设备**：令牌首次使用后绑定当时的电脑。换电脑时到网页端「我的账户 → 智能体接入」点「解绑设备」，或重新生成令牌。
 - **提示令牌无效**：修改平台密码、或在网页端重新生成过令牌，都会让旧令牌失效——重新生成并 configure 即可。
+- **本地令牌提示无效**：确认首次配置使用了上面的本地测试命令；不要把本地令牌发往线上域名。
 - **余额不足**：添加客服微信 baojian_xue 充值；采集中断的任务充值后可从断点续采，不会重复扣费。
 - 系统要求：macOS / Linux / Windows，Python 3.9+（无需安装任何第三方包）。
